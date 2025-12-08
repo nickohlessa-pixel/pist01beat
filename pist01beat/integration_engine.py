@@ -13,7 +13,7 @@ It exposes a small, deterministic IntegrationEngine that:
 - Calls each engine with those inputs
 - Returns a single, unified state dict
 
-This is a *wiring* layer only.
+This is a wiring layer only.
 No NBA data, no betting logic, no external side effects.
 """
 
@@ -26,37 +26,46 @@ from .chaos_engine import ChaosEngine
 from .volatility_engine import VolatilityEngine
 
 
-# --------------------------------------------------------------------- #
-# Internal helper: normalize engine outputs to dicts
-# --------------------------------------------------------------------- #
-def _to_dict(obj: Any) -> Dict[str, Any]:
+# ============================================================
+# Helpers
+# ============================================================
+
+def _normalize_result(result: Any) -> Dict[str, Any]:
     """
-    Normalize an engine result into a plain dict.
+    Normalize engine outputs into a dict.
 
     Supports:
-    - already-a-dict
-    - dataclass / simple object with __dict__
-    - objects with .to_dict()
+    - dict (returned as-is)
+    - dataclass / simple object (uses .to_dict() if present, else __dict__)
+    - None → {}
     """
-    if isinstance(obj, dict):
-        return obj
+    if result is None:
+        return {}
 
-    # If the object exposes a to_dict() method, prefer that.
-    to_dict_method = getattr(obj, "to_dict", None)
-    if callable(to_dict_method):
+    if isinstance(result, dict):
+        return result
+
+    # If the result has an explicit to_dict() method, prefer that.
+    to_dict = getattr(result, "to_dict", None)
+    if callable(to_dict):
         try:
-            return to_dict_method()
+            out = to_dict()  # type: ignore[no-any-return]
+            if isinstance(out, dict):
+                return out
         except Exception:
-            pass  # Fall back to __dict__ below.
+            pass
 
-    # Generic object → use __dict__ if available.
-    d = getattr(obj, "__dict__", None)
-    if isinstance(d, dict):
-        return dict(d)
+    # Fallback: use the object __dict__ if available.
+    if hasattr(result, "__dict__"):
+        return dict(result.__dict__)
 
-    # Last resort: wrap the raw value.
-    return {"value": obj}
+    # Last resort: empty dict
+    return {}
 
+
+# ============================================================
+# Core Integration Engine
+# ============================================================
 
 class IntegrationEngine:
     """
@@ -86,9 +95,6 @@ class IntegrationEngine:
         self.chaos_engine = chaos_engine or ChaosEngine()
         self.volatility_engine = volatility_engine or VolatilityEngine()
 
-    # --------------------------------------------------------------------- #
-    # Public API
-    # --------------------------------------------------------------------- #
     def compute_integrated_state(
         self,
         home_team: str,
@@ -121,67 +127,73 @@ class IntegrationEngine:
         if home_team == away_team:
             raise ValueError("home_team and away_team must be different teams.")
 
-        # 1) Core engines — may return dicts or objects (dataclasses, etc.).
+        # 1) Call core engines (raw objects)
         identity_raw = self.identity_engine.compute_identity(
             home_team=home_team,
             away_team=away_team,
         )
+
         chaos_raw = self.chaos_engine.compute_chaos(
             home_team=home_team,
             away_team=away_team,
             notes=notes,
         )
+
         volatility_raw = self.volatility_engine.compute_volatility(
             home_team=home_team,
             away_team=away_team,
         )
 
-        # Normalize to plain dicts for integration.
-        identity_result = _to_dict(identity_raw)
-        chaos_result = _to_dict(chaos_raw)
-        volatility_result = _to_dict(volatility_raw)
+        # 2) Normalize to dicts so we can safely .get()
+        identity = _normalize_result(identity_raw)
+        chaos = _normalize_result(chaos_raw)
+        volatility = _normalize_result(volatility_raw)
 
-        # 2) Light summary lens across engines
+        # 3) Light summary lens across engines
         summary: Dict[str, Any] = {
             # Identity-derived
-            "base_spread": identity_result.get("base_spread"),
-            "base_total": identity_result.get("base_total"),
-            "pace_factor": identity_result.get("pace_factor"),
-            "power_diff": identity_result.get("power_diff"),
+            "base_spread": identity.get("base_spread"),
+            "base_total": identity.get("base_total"),
+            "pace_factor": identity.get("pace_factor"),
+            "power_diff": identity.get("power_diff"),
             # Chaos + volatility health flags
-            "chaos_flag": chaos_result.get("chaos_flag"),
-            "chaos_score": chaos_result.get("chaos_score"),
-            "volatility_flag": volatility_result.get("volatility_flag"),
-            "volatility_score": volatility_result.get("volatility_score"),
+            "chaos_flag": chaos.get("chaos_flag"),
+            "chaos_score": chaos.get("chaos_score"),
+            "volatility_flag": volatility.get("volatility_flag"),
+            "volatility_score": volatility.get("volatility_score"),
         }
 
-        # 3) Full integrated state
+        # 4) Full integrated state
         integrated_state: Dict[str, Any] = {
             "engine_version": self.ENGINE_VERSION,
             "home_team": home_team,
             "away_team": away_team,
             "summary": summary,
-            "identity": identity_result,
-            "chaos": chaos_result,
-            "volatility": volatility_result,
+            "identity": identity,
+            "chaos": chaos,
+            "volatility": volatility,
             "debug": {
                 "input": {
                     "home_team": home_team,
                     "away_team": away_team,
                     "notes": notes,
                 },
-                "identity_debug": identity_result.get("debug"),
-                "chaos_debug": chaos_result.get("debug"),
-                "volatility_debug": volatility_result.get("debug"),
+                "identity_raw_type": type(identity_raw).__name__,
+                "chaos_raw_type": type(chaos_raw).__name__,
+                "volatility_raw_type": type(volatility_raw).__name__,
+                "identity_debug": identity.get("debug"),
+                "chaos_debug": chaos.get("debug"),
+                "volatility_debug": volatility.get("debug"),
             },
         }
 
         return integrated_state
 
 
-# ------------------------------------------------------------------------- #
+# ============================================================
 # Convenience function
-# ------------------------------------------------------------------------- #
+# ============================================================
+
 def compute_integrated_state(
     home_team: str,
     away_team: str,
@@ -196,7 +208,11 @@ def compute_integrated_state(
     without manually instantiating IntegrationEngine.
     """
     engine = IntegrationEngine()
-    return engine.compute_integrated_state(home_team=home_team, away_team=away_team, notes=notes)
+    return engine.compute_integrated_state(
+        home_team=home_team,
+        away_team=away_team,
+        notes=notes,
+    )
 
 
 if __name__ == "__main__":
