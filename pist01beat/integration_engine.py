@@ -26,6 +26,38 @@ from .chaos_engine import ChaosEngine
 from .volatility_engine import VolatilityEngine
 
 
+# --------------------------------------------------------------------- #
+# Internal helper: normalize engine outputs to dicts
+# --------------------------------------------------------------------- #
+def _to_dict(obj: Any) -> Dict[str, Any]:
+    """
+    Normalize an engine result into a plain dict.
+
+    Supports:
+    - already-a-dict
+    - dataclass / simple object with __dict__
+    - objects with .to_dict()
+    """
+    if isinstance(obj, dict):
+        return obj
+
+    # If the object exposes a to_dict() method, prefer that.
+    to_dict_method = getattr(obj, "to_dict", None)
+    if callable(to_dict_method):
+        try:
+            return to_dict_method()
+        except Exception:
+            pass  # Fall back to __dict__ below.
+
+    # Generic object → use __dict__ if available.
+    d = getattr(obj, "__dict__", None)
+    if isinstance(d, dict):
+        return dict(d)
+
+    # Last resort: wrap the raw value.
+    return {"value": obj}
+
+
 class IntegrationEngine:
     """
     Integration Engine v3.4
@@ -89,22 +121,25 @@ class IntegrationEngine:
         if home_team == away_team:
             raise ValueError("home_team and away_team must be different teams.")
 
-        # 1) Core engines
-        identity_result = self.identity_engine.compute_identity(
+        # 1) Core engines — may return dicts or objects (dataclasses, etc.).
+        identity_raw = self.identity_engine.compute_identity(
             home_team=home_team,
             away_team=away_team,
         )
-
-        chaos_result = self.chaos_engine.compute_chaos(
+        chaos_raw = self.chaos_engine.compute_chaos(
             home_team=home_team,
             away_team=away_team,
             notes=notes,
         )
-
-        volatility_result = self.volatility_engine.compute_volatility(
+        volatility_raw = self.volatility_engine.compute_volatility(
             home_team=home_team,
             away_team=away_team,
         )
+
+        # Normalize to plain dicts for integration.
+        identity_result = _to_dict(identity_raw)
+        chaos_result = _to_dict(chaos_raw)
+        volatility_result = _to_dict(volatility_raw)
 
         # 2) Light summary lens across engines
         summary: Dict[str, Any] = {
@@ -166,7 +201,7 @@ def compute_integrated_state(
 
 if __name__ == "__main__":
     # Simple smoke test / example usage (safe to ignore in production).
-    demo = compute_integrated_state("HOR", "DEN")
-    # Print only the high-level summary for quick inspection.
     from pprint import pprint
+
+    demo = compute_integrated_state("HOR", "DEN")
     pprint(demo["summary"])
