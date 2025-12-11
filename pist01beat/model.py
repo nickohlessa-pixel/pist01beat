@@ -1,15 +1,17 @@
 # FILE: pist01beat/model.py
 """
-Pist01 Beat v3.4 — High-level wrapper.
+Pist01 Beat v3.4 — high-level wrapper.
 
-Single public entrypoint:
+Public entrypoint:
 
     from pist01beat import Pist01Beat
 
-This wrapper delegates the full pipeline to IntegrationEngine,
-which calls the underlying engines and returns the final result.
+This wrapper delegates to IntegrationEngine, which returns the
+full engine stack output (identity, chaos, volatility, spread).
+predict() normalizes that into stable spread/total lines.
 """
 
+from dataclasses import asdict, is_dataclass
 from typing import Any, Dict
 
 from .integration_engine import IntegrationEngine
@@ -19,52 +21,104 @@ class Pist01Beat:
     """High-level Pist01 Beat v3.4 wrapper."""
 
     def __init__(self) -> None:
-        # Orchestration layer that runs the full pipeline.
-        self.integration_engine = IntegrationEngine()
+        # Single orchestration layer that runs the full pipeline
+        self.integration = IntegrationEngine()
 
+    # ----------------------------
+    # Helpers
+    # ----------------------------
+    @staticmethod
+    def _to_dict(obj: Any) -> Dict[str, Any]:
+        """
+        Convert dataclasses, dicts, or simple objects into a dict
+        for unified access. Safe, no exceptions thrown.
+        """
+        if obj is None:
+            return {}
+
+        if isinstance(obj, dict):
+            return obj
+
+        if is_dataclass(obj):
+            return asdict(obj)
+
+        out: Dict[str, Any] = {}
+        for name in dir(obj):
+            if name.startswith("_"):
+                continue
+            try:
+                out[name] = getattr(obj, name)
+            except Exception:
+                continue
+        return out
+
+    # ----------------------------
+    # Public API
+    # ----------------------------
     def predict(self, home_team: str, away_team: str) -> Dict[str, Any]:
         """
-        Run the full v3.4 pipeline for a matchup.
+        Run the full v3.4 stack and return:
 
-        Returns:
-        - engine_version
-        - home_team
-        - away_team
-        - model_spread
-        - model_total
-        plus full engine state under 'debug'.
+        {
+            "engine_version": str,
+            "home_team": str,
+            "away_team": str,
+            "model_spread": float,
+            "model_total": float,
+            "debug": { ... full engine results ... }
+        }
         """
-        # Run the integration layer to get full engine state
-        state = self.integration_engine.run(home_team=home_team, away_team=away_team)
+        # Run full pipeline
+        result = self.integration.run(home_team=home_team, away_team=away_team)
 
-        # Spread block comes from SpreadEngine via IntegrationEngine
-        spread_block = state.get("spread", None)
+        # Normalize result object → dict
+        res = self._to_dict(result)
 
-        model_spread = None
-        model_total = None
+        # Extract engine_version (integration, spread, or fallback)
+        engine_version = (
+            res.get("engine_version")
+            or self._to_dict(res.get("spread", {})).get("engine_version")
+            or "3.4-wrapper-integration"
+        )
 
-        if spread_block is not None:
-            # Prefer dataclass attributes
-            model_spread = getattr(spread_block, "model_spread", None)
-            model_total = getattr(spread_block, "model_total", None)
+        # Extract components for debug
+        identity = res.get("identity")
+        chaos = res.get("chaos")
+        volatility = res.get("volatility")
+        spread_obj = res.get("spread")
 
-            # Fallback if spread_block is dict-like
-            if model_spread is None and isinstance(spread_block, dict):
-                model_spread = spread_block.get("model_spread")
-            if model_total is None and isinstance(spread_block, dict):
-                model_total = spread_block.get("model_total")
+        spread_dict = self._to_dict(spread_obj)
 
-        # Final safety defaults if something is missing
+        # Choose correct spread attributes
+        model_spread = (
+            spread_dict.get("final_spread")
+            if "final_spread" in spread_dict
+            else spread_dict.get("base_spread")
+        )
+
+        model_total = (
+            spread_dict.get("final_total")
+            if "final_total" in spread_dict
+            else spread_dict.get("base_total")
+        )
+
+        # Final safety defaults
         if model_spread is None:
             model_spread = 0.0
         if model_total is None:
             model_total = 0.0
 
         return {
-            "engine_version": state.get("engine_version", "3.4-model-v1"),
-            "home_team": state.get("home_team", home_team),
-            "away_team": state.get("away_team", away_team),
+            "engine_version": engine_version,
+            "home_team": home_team,
+            "away_team": away_team,
             "model_spread": model_spread,
             "model_total": model_total,
-            "debug": state,
+            "debug": {
+                "identity": identity,
+                "chaos": chaos,
+                "volatility": volatility,
+                "spread": spread_obj,
+                "integration_raw": result,
+            },
         }
