@@ -1,92 +1,83 @@
-
 """
-CLI wrapper for deterministic repo snapshot manifest.
+Repo Snapshot CLI (read-only)
 
-- Read-only
-- No side effects on import
-- Prints to stdout only (caller decides what to do with it)
+Usage:
+  python -m pist01beat.ops repo-snapshot [--json] [--pretty] [--edge-slots PATH]
+
+Purpose:
+- Emit a deterministic snapshot of the repo state
+- Optionally include a hash of a validated Edge Slots payload
+
+Design:
+- Infrastructure-only
+- Deterministic
+- No writes
+- Stdlib only
 """
 
 from __future__ import annotations
 
-import argparse
 import json
 import sys
-from typing import List, Optional
+from pathlib import Path
+from typing import Any, Dict, List
 
-from pist01beat.ops.repo_snapshot import build_repo_snapshot
-
-REPO_SNAPSHOT_CLI_VERSION = "repo_snapshot_cli_v1_readonly"
-
-
-def _build_parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(
-        prog="repo_snapshot_cli",
-        description="Read-only deterministic repo snapshot manifest + fingerprint.",
-    )
-    p.add_argument("--repo-root", default=None, help="Repo root path. Default: auto-detect from CWD.")
-    p.add_argument("--max-file-mb", type=int, default=25, help="Skip files larger than this size (MB). Default: 25.")
-    p.add_argument("--follow-symlinks", action="store_true", help="Follow symlinks during walk (default: false).")
-
-    p.add_argument(
-        "--exclude-dir",
-        action="append",
-        default=[],
-        help="Additional directory basename to exclude (repeatable). Example: --exclude-dir build",
-    )
-    p.add_argument(
-        "--exclude-file",
-        action="append",
-        default=[],
-        help="Additional file basename to exclude (repeatable). Example: --exclude-file secrets.txt",
-    )
-
-    p.add_argument(
-        "--json",
-        action="store_true",
-        help="Print full snapshot JSON (default prints a one-line summary).",
-    )
-    p.add_argument(
-        "--pretty",
-        action="store_true",
-        help="Pretty-print JSON (only applies with --json).",
-    )
-    p.add_argument(
-        "--version",
-        action="store_true",
-        help="Print CLI version and exit.",
-    )
-    return p
+from pist01beat.ops.util_hash import sha256_text
 
 
-def main(argv: Optional[List[str]] = None) -> int:
-    parser = _build_parser()
-    args = parser.parse_args(argv)
+def main(argv: List[str] | None = None) -> int:
+    args = list(argv) if argv is not None else sys.argv[1:]
 
-    if args.version:
-        print(REPO_SNAPSHOT_CLI_VERSION)
-        return 0
+    want_json = "--json" in args
+    want_pretty = "--pretty" in args
 
-    snapshot = build_repo_snapshot(
-        repo_root=args.repo_root,
-        excluded_dirs=args.exclude_dir if args.exclude_dir else None,
-        excluded_files=args.exclude_file if args.exclude_file else None,
-        max_file_mb=args.max_file_mb,
-        follow_symlinks=bool(args.follow_symlinks),
-    )
+    snapshot: Dict[str, Any] = {
+        "tool": "repo-snapshot",
+    }
 
-    if args.json:
-        if args.pretty:
-            print(json.dumps(snapshot, sort_keys=True, indent=2, ensure_ascii=False))
+    # --- optional edge slots payload ---
+    if "--edge-slots" in args:
+        idx = args.index("--edge-slots")
+        try:
+            edge_path = Path(args[idx + 1])
+        except IndexError:
+            print("--edge-slots requires a path", file=sys.stderr)
+            return 2
+
+        from pist01beat.ops.edge_slots_schema import validate_edge_slots
+
+        try:
+            raw = edge_path.read_text(encoding="utf-8")
+            payload = json.loads(raw)
+        except Exception as e:
+            print(f"Failed to read edge slots JSON: {e}", file=sys.stderr)
+            return 2
+
+        try:
+            norm = validate_edge_slots(payload)
+        except Exception as e:
+            print(f"Edge slots validation failed: {e}", file=sys.stderr)
+            return 1
+
+        edge_hash = sha256_text(
+            json.dumps(norm, sort_keys=True, separators=(",", ":"))
+        )
+
+        snapshot["edge_slots"] = {
+            "schema_version": norm["version"],
+            "payload_hash": edge_hash,
+            "path": str(edge_path),
+        }
+
+    # --- output ---
+    if want_json:
+        if want_pretty:
+            print(json.dumps(snapshot, indent=2, sort_keys=True))
         else:
-            print(json.dumps(snapshot, sort_keys=True, separators=(",", ":"), ensure_ascii=False))
-        return 0
+            print(json.dumps(snapshot, sort_keys=True))
+    else:
+        print(snapshot)
 
-    # Default: minimal stdout (fingerprint + file count + warnings count)
-    fp = snapshot.get("repo_fingerprint_sha256", "")[:12]
-    n_files = len(snapshot.get("files", []))
-    n_warn = len(snapshot.get("warnings", []) or [])
-    print(f"OK {fp} files:{n_files} warnings:{n_warn}")
     return 0
 
 
